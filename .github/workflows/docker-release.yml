@@ -28,22 +28,39 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract branch name
+      - name: Extract branch name and version
         shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "release" ]]; then
             # For releases, use the target branch (where the release was created from)
             BRANCH_NAME="${{ github.event.release.target_commitish }}"
+            # Try multiple ways to get the release version
+            if [[ -n "${{ github.event.release.tag_name }}" ]]; then
+              VERSION="${{ github.event.release.tag_name }}"
+            elif [[ -n "${{ github.ref_name }}" ]]; then
+              VERSION="${{ github.ref_name }}"
+            else
+              VERSION="${{ github.sha }}"
+            fi
+            
+            # Fallback if target_commitish is empty
+            if [[ -z "$BRANCH_NAME" ]]; then
+              BRANCH_NAME="main"
+            fi
           else
             # For pushes, extract branch name from ref
             BRANCH_NAME="${{ github.ref_name }}"
+            VERSION="${{ github.sha }}"
           fi
+          
           # Sanitize branch name for Docker tag (replace / and other invalid chars with -)
           SANITIZED_BRANCH=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/--*/-/g' | sed 's/^-\|-$//g')
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
           echo "SANITIZED_BRANCH=$SANITIZED_BRANCH" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "Branch: $BRANCH_NAME"
           echo "Sanitized: $SANITIZED_BRANCH"
+          echo "Version: $VERSION"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -89,6 +106,26 @@ jobs:
             ${{ runner.os }}-buildx-${{ env.SANITIZED_BRANCH }}-
             ${{ runner.os }}-buildx-
 
+      - name: Debug environment variables
+        run: |
+          echo "=== GitHub Context Debug ==="
+          echo "Event name: ${{ github.event_name }}"
+          echo "GitHub ref: ${{ github.ref }}"
+          echo "GitHub ref name: ${{ github.ref_name }}"
+          echo "GitHub SHA: ${{ github.sha }}"
+          
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "=== Release Event Debug ==="
+            echo "Release tag name: ${{ github.event.release.tag_name }}"
+            echo "Release target commitish: ${{ github.event.release.target_commitish }}"
+            echo "Release name: ${{ github.event.release.name }}"
+          fi
+          
+          echo "=== Final Environment Variables ==="
+          echo "BRANCH_NAME: ${{ env.BRANCH_NAME }}"
+          echo "SANITIZED_BRANCH: ${{ env.SANITIZED_BRANCH }}"
+          echo "VERSION: ${{ env.VERSION }}"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -101,6 +138,8 @@ jobs:
           build-args: |
             BRANCH_NAME=${{ env.BRANCH_NAME }}
             SANITIZED_BRANCH=${{ env.SANITIZED_BRANCH }}
+            environ=${{ env.SANITIZED_BRANCH }}
+            version=${{ env.VERSION }}
 
       - name: Update Release with Image Info
         if: success() && github.event_name == 'release'
