@@ -5,8 +5,8 @@ ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 ARG environ
 ARG version
-ENV ENVIRONMENT=${environ}
-ENV VERSION=${version}
+ENV ENVIRON=${environ}
+ENV VERS=${version}
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -19,8 +19,8 @@ WORKDIR /app
 
 ARG environ
 ARG version
-ENV ENVIRONMENT=${environ}
-ENV VERSION=${version}
+ENV ENVIRON=${environ}
+ENV VERS=${version}
 ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONPATH=/app
 ENV PYTHONDONTWRITEBYTECODE=1
