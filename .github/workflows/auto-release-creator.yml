@@ -4,10 +4,16 @@ on:
   pull_request:
     types: [closed]
     branches: [staging,dev]
+    # On Successful Merge on these Branch , Automatic Release Will be Created on the basis of commit messages.branch_protection_rule: 
+    # Major for [major] or [MAJOR] in commit message
+    # Minor for [minor] or [MINOR] in commit message
+    # Patch for [patch] or [PATCH] in commit message
+    # v[Major].[Minor].[Patch]
 
 permissions:
   contents: write
-  pull-requests: read
+  pull-requests: write
+  issues: write
 
 jobs:
   auto-release:
