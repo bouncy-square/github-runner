@@ -4,7 +4,7 @@ on:
   release:
     types: [published]
   push:
-    branches: [main, staging, uat,dev]
+    branches: ["**"]
 
 env:
   REGISTRY: ghcr.io
@@ -20,7 +20,6 @@ jobs:
   build-and-publish:
     name: Build and Publish
     runs-on: ubuntu-latest
-    environment: ${{ github.ref == 'refs/heads/main' && 'production' || github.ref == 'refs/heads/staging' && 'staging' || github.ref == 'refs/heads/uat' && 'uat' || github.ref == 'refs/heads/dev' && 'dev' || 'dev' }}
     
     steps:
       - name: Checkout code
@@ -28,6 +27,40 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract branch name and version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            # For releases, use the target branch (where the release was created from)
+            BRANCH_NAME="${{ github.event.release.target_commitish }}"
+            # Try multiple ways to get the release version
+            if [[ -n "${{ github.event.release.tag_name }}" ]]; then
+              VERSION="${{ github.event.release.tag_name }}"
+            elif [[ -n "${{ github.ref_name }}" ]]; then
+              VERSION="${{ github.ref_name }}"
+            else
+              VERSION="${{ github.sha }}"
+            fi
+            
+            # Fallback if target_commitish is empty
+            if [[ -z "$BRANCH_NAME" ]]; then
+              BRANCH_NAME="main"
+            fi
+          else
+            # For pushes, extract branch name from ref
+            BRANCH_NAME="${{ github.ref_name }}"
+            VERSION="${{ github.sha }}"
+          fi
+          
+          # Sanitize branch name for Docker tag (replace / and other invalid chars with -)
+          SANITIZED_BRANCH=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/--*/-/g' | sed 's/^-\|-$//g')
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+          echo "SANITIZED_BRANCH=$SANITIZED_BRANCH" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Branch: $BRANCH_NAME"
+          echo "Sanitized: $SANITIZED_BRANCH"
+          echo "Version: $VERSION"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -48,25 +81,50 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
+            # For releases: create version tags
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=semver,pattern=${{ env.SANITIZED_BRANCH }}-{{version}}
+            
+            # For branches: create branch-based tags
+            type=raw,value=${{ env.SANITIZED_BRANCH }}-latest,enable={{is_default_branch}}
+            type=raw,value=${{ env.SANITIZED_BRANCH }}-latest,enable=${{ github.event_name != 'release' }}
+            
+            # Additional useful tags
             type=ref,event=branch,prefix={{branch}}-
             type=ref,event=tag
             type=ref,event=pr
-            type=sha,format=long
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=staging-latest,enable=${{ github.ref == 'refs/heads/staging' }}
-            type=raw,value=uat-latest,enable=${{ github.ref == 'refs/heads/uat' }}
-            type=raw,value=dev-latest,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=sha,format=long,prefix=${{ env.SANITIZED_BRANCH }}-sha-
 
       - name: Cache Docker layers
         uses: actions/cache@v3
         with:
           path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          key: ${{ runner.os }}-buildx-${{ env.SANITIZED_BRANCH }}-${{ github.sha }}
           restore-keys: |
+            ${{ runner.os }}-buildx-${{ env.SANITIZED_BRANCH }}-
             ${{ runner.os }}-buildx-
+
+      - name: Debug environment variables
+        run: |
+          echo "=== GitHub Context Debug ==="
+          echo "Event name: ${{ github.event_name }}"
+          echo "GitHub ref: ${{ github.ref }}"
+          echo "GitHub ref name: ${{ github.ref_name }}"
+          echo "GitHub SHA: ${{ github.sha }}"
+          
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "=== Release Event Debug ==="
+            echo "Release tag name: ${{ github.event.release.tag_name }}"
+            echo "Release target commitish: ${{ github.event.release.target_commitish }}"
+            echo "Release name: ${{ github.event.release.name }}"
+          fi
+          
+          echo "=== Final Environment Variables ==="
+          echo "BRANCH_NAME: ${{ env.BRANCH_NAME }}"
+          echo "SANITIZED_BRANCH: ${{ env.SANITIZED_BRANCH }}"
+          echo "VERSION: ${{ env.VERSION }}"
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -78,7 +136,10 @@ jobs:
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new
           build-args: |
-            NODE_ENV=${{ github.ref == 'refs/heads/main' && 'production' || github.ref == 'refs/heads/staging' && 'staging' || github.ref == 'refs/heads/uat' && 'uat' ||github.ref == 'refs/heads/dev' && 'dev' || 'dev' }}
+            BRANCH_NAME=${{ env.BRANCH_NAME }}
+            SANITIZED_BRANCH=${{ env.SANITIZED_BRANCH }}
+            environ=${{ env.SANITIZED_BRANCH }}
+            version=${{ env.VERSION }}
 
       - name: Update Release with Image Info
         if: success() && github.event_name == 'release'
@@ -88,42 +149,27 @@ jobs:
             const { owner, repo } = context.repo;
             const releaseId = ${{ github.event.release.id }};
             const version = '${{ github.ref_name }}';
+            const branchName = process.env.BRANCH_NAME;
+            const sanitizedBranch = process.env.SANITIZED_BRANCH;
             const registry = '${{ env.REGISTRY }}'.toLowerCase();
             const ownerLower = owner.toLowerCase();
             const imageName = `${registry}/${ownerLower}/${repo}`;
-            
-            let envTag = 'latest';
-            let envName = 'Production';
-            let branchName = 'main';
-            
-            if ('${{ github.ref }}'.startsWith('refs/heads/staging')) {
-              envTag = 'staging-latest';
-              envName = 'Staging';
-              branchName = 'staging';
-            } else if ('${{ github.ref }}'.startsWith('refs/heads/uat')) {
-              envTag = 'uat-latest';
-              envName = 'UAT';
-              branchName = 'uat';
-            } else if ('${{ github.ref }}'.startsWith('refs/heads/dev')) {
-              envTag = 'dev-latest';
-              envName = 'Dev';
-              branchName = 'dev';
-            }
             
             const versionMatch = version.match(/v?(\d+)\.(\d+)\.(\d+)/);
             const majorVersion = versionMatch ? versionMatch[1] : '';
             const minorVersion = versionMatch ? `${versionMatch[1]}.${versionMatch[2]}` : '';
             
             const message = `### 🐳 Docker Image\n` +
-                          `**${envName} Image:** \`${imageName}:${envTag}\`\n` +
+                          `**Latest Image:** \`${imageName}:${sanitizedBranch}-latest\`\n` +
                           `**Version Tag:** \`${imageName}:${version}\`\n` +
-                          `**Branch Tag:** \`${imageName}:${branchName}\`\n` +
+                          `**Branch Version:** \`${imageName}:${sanitizedBranch}-${version}\`\n` +
                           (majorVersion ? `**Major Version:** \`${imageName}:${majorVersion}\`\n` : '') +
                           (minorVersion ? `**Minor Version:** \`${imageName}:${minorVersion}\`\n` : '') +
-                          `**SHA Tag:** \`${imageName}:sha-${{ github.sha }}\`\n\n` +
+                          `**SHA Tag:** \`${imageName}:${sanitizedBranch}-sha-${{ github.sha }}\`\n\n` +
                           `#### Pull Commands\n\`\`\`bash\n` +
                           `# Pull by version (recommended)\ndocker pull ${imageName}:${version}\n\n` +
-                          `# Pull ${envName} image\ndocker pull ${imageName}:${envTag}\n\`\`\``;
+                          `# Pull by branch version\ndocker pull ${imageName}:${sanitizedBranch}-${version}\n\n` +
+                          `# Pull latest from branch\ndocker pull ${imageName}:${sanitizedBranch}-latest\n\`\`\``;
 
             await github.rest.repos.updateRelease({
               owner,
