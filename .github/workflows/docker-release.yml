@@ -2,7 +2,8 @@ name: Build and Publish Docker Image
 
 on:
   release:
-    types: [published]
+    # Release Created [even in drafts as Well] and Published [release is Public]
+    types: [created,published]
 
 env:
   REGISTRY: ghcr.io
@@ -15,6 +16,18 @@ permissions:
   actions: read
 
 jobs:
+  debug:
+    name: Debug Release Event
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug GitHub Event
+        run: |
+          echo "Event name: ${{ github.event_name }}"
+          echo "Event action: ${{ github.event.action }}"
+          echo "Release state: ${{ github.event.release.draft }}"
+          echo "Release prerelease: ${{ github.event.release.prerelease }}"
+          echo "Release published_at: ${{ github.event.release.published_at }}"
+
   build-and-publish:
     name: Build and Publish
     runs-on: ubuntu-latest
