@@ -25,7 +25,7 @@ jobs:
           # Use PAT to trigger other workflows, fallback to GITHUB_TOKEN
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Get latest tag (improved version detection)
+      - name: Get latest tag
         id: get_tag
         run: |
           echo "=== TAG DETECTION DEBUG ==="
