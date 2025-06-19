@@ -1,0 +1,330 @@
+name: Auto Create Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [staging, dev]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+jobs:
+  auto-release:
+    if: github.event.pull_request.merged == true
+    name: Auto Create Release
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Use PAT to trigger other workflows, fallback to GITHUB_TOKEN
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          echo "=== TAG DETECTION DEBUG ==="
+          echo "All existing tags:"
+          git tag -l | sort -V
+          
+          # Get the latest tag using proper version sorting
+          LATEST_TAG=$(git tag -l | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          
+          # Fallback if no tags found
+          if [[ -z "$LATEST_TAG" ]]; then
+            LATEST_TAG="v0.0.0"
+            echo "No existing tags found, starting from v0.0.0"
+          else
+            echo "Latest tag found: $LATEST_TAG"
+          fi
+          
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "✅ Latest tag: $LATEST_TAG"
+
+      - name: Determine version bump
+        id: version_bump
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_BODY="${{ github.event.pull_request.body }}"
+          PR_LABELS="${{ join(github.event.pull_request.labels.*.name, ' ') }}"
+          
+          BUMP_TYPE="patch"
+          
+          echo "=== Version Bump Detection ==="
+          echo "PR Title: $PR_TITLE"
+          echo "PR Labels: $PR_LABELS"
+          echo "PR Body contains BREAKING CHANGE: $(echo "$PR_BODY" | grep -q "BREAKING.CHANGE" && echo "YES" || echo "NO")"
+          
+          if [[ "$PR_TITLE" =~ \[major\]|\[MAJOR\] ]] || [[ "$PR_LABELS" =~ major ]] || [[ "$PR_BODY" =~ BREAKING.CHANGE ]]; then
+            BUMP_TYPE="major"
+          elif [[ "$PR_TITLE" =~ \[minor\]|\[MINOR\] ]] || [[ "$PR_LABELS" =~ minor ]] || [[ "$PR_LABELS" =~ feature ]]; then
+            BUMP_TYPE="minor"
+          elif [[ "$PR_TITLE" =~ \[patch\]|\[PATCH\] ]] || [[ "$PR_LABELS" =~ patch ]] || [[ "$PR_LABELS" =~ bugfix ]] || [[ "$PR_LABELS" =~ bug ]]; then
+            BUMP_TYPE="patch"
+          fi
+          
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "Determined version bump type: $BUMP_TYPE"
+
+      - name: Calculate new version
+        id: new_version
+        run: |
+          LATEST_TAG="${{ steps.get_tag.outputs.latest_tag }}"
+          BUMP_TYPE="${{ steps.version_bump.outputs.bump_type }}"
+          
+          echo "=== Version Calculation ==="
+          echo "Latest tag: $LATEST_TAG"
+          echo "Bump type: $BUMP_TYPE"
+          
+          # Remove 'v' prefix and split version
+          VERSION_NUMBER=${LATEST_TAG#v}
+          
+          # Handle the case where LATEST_TAG might be just "v0.0.0"
+          if [[ "$VERSION_NUMBER" == "0.0.0" ]] && [[ "$LATEST_TAG" == "v0.0.0" ]]; then
+            echo "Starting from initial version"
+            MAJOR=0
+            MINOR=0
+            PATCH=0
+          else
+            IFS='.' read -ra VERSION_PARTS <<< "$VERSION_NUMBER"
+            MAJOR=${VERSION_PARTS[0]:-0}
+            MINOR=${VERSION_PARTS[1]:-0}
+            PATCH=${VERSION_PARTS[2]:-0}
+          fi
+          
+          echo "Current version components: MAJOR=$MAJOR, MINOR=$MINOR, PATCH=$PATCH"
+          
+          case $BUMP_TYPE in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+          
+          NEW_VERSION="v$MAJOR.$MINOR.$PATCH"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "New version calculated: $NEW_VERSION"
+
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          
+          echo "=== TAG EXISTENCE CHECK ==="
+          echo "Checking if tag $NEW_VERSION already exists..."
+          
+          if git rev-parse "$NEW_VERSION" >/dev/null 2>&1; then
+            echo "❌ Tag $NEW_VERSION already exists!"
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+            
+            echo "Current tags (sorted by version):"
+            git tag -l | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V
+            
+            echo ""
+            echo "🔍 DEBUGGING INFO:"
+            echo "Latest tag detected: ${{ steps.get_tag.outputs.latest_tag }}"
+            echo "Calculated new version: $NEW_VERSION"
+            echo "Bump type: ${{ steps.version_bump.outputs.bump_type }}"
+            echo ""
+            echo "💡 This usually means:"
+            echo "1. The version calculation is incorrect"
+            echo "2. A release was already created for this PR"
+            echo "3. Tags were created manually"
+            
+            # Don't exit with error, let the workflow continue with a skip
+            echo "SHOULD_SKIP=true" >> $GITHUB_OUTPUT
+          else
+            echo "✅ Tag $NEW_VERSION does not exist, proceeding..."
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+            echo "SHOULD_SKIP=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Skip if tag exists
+        if: steps.check_tag.outputs.SHOULD_SKIP == 'true'
+        run: |
+          echo "⏭️ Skipping release creation because tag already exists"
+          echo "If you need to create a new release, either:"
+          echo "1. Delete the existing tag: git tag -d ${{ steps.new_version.outputs.new_version }} && git push origin :refs/tags/${{ steps.new_version.outputs.new_version }}"
+          echo "2. Use a different version bump in your PR title/labels"
+          exit 0
+
+      - name: Configure Git
+        if: steps.check_tag.outputs.SHOULD_SKIP != 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create and push Git tag
+        if: steps.check_tag.outputs.SHOULD_SKIP != 'true'
+        id: create_tag
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          
+          echo "Creating Git tag: $NEW_VERSION"
+          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
+          
+          echo "Pushing tag to remote..."
+          git push origin "$NEW_VERSION"
+          
+          echo "Verifying tag was created..."
+          git tag -l "$NEW_VERSION"
+          
+          echo "✅ Tag $NEW_VERSION created and pushed successfully"
+
+      - name: Generate release notes
+        if: steps.check_tag.outputs.SHOULD_SKIP != 'true'
+        id: release_notes
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          PR_BODY="${{ github.event.pull_request.body }}"
+          BUMP_TYPE="${{ steps.version_bump.outputs.bump_type }}"
+          
+          RELEASE_NOTES="## What's Changed
+
+          ### 🚀 Changes in this Release
+          * $PR_TITLE (#$PR_NUMBER) by @$PR_AUTHOR
+
+          ### 📝 Details
+          $PR_BODY
+
+          ### 🏷️ Version Information
+          * **Release Type**: $BUMP_TYPE version bump
+          * **Previous Version**: ${{ steps.get_tag.outputs.latest_tag }}
+          * **New Version**: ${{ steps.new_version.outputs.new_version }}
+
+          ---
+          **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ steps.get_tag.outputs.latest_tag }}...${{ steps.new_version.outputs.new_version }}
+
+          > 🐳 Docker images will be automatically built and published shortly."
+          
+          echo "$RELEASE_NOTES" > release_notes.md
+          echo "Release notes generated successfully"
+
+      - name: Create Release
+        if: steps.check_tag.outputs.SHOULD_SKIP != 'true'
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        env:
+          # Use PAT to trigger other workflows, fallback to GITHUB_TOKEN
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.new_version.outputs.new_version }}
+          name: Release ${{ steps.new_version.outputs.new_version }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+          make_latest: true
+          generate_release_notes: false
+
+      - name: Wait for Release to be Available
+        if: steps.check_tag.outputs.SHOULD_SKIP != 'true'
+        run: |
+          echo "Waiting 10 seconds for release to be fully created..."
+          sleep 10
+
+      - name: Verify release and tag
+        if: steps.check_tag.outputs.SHOULD_SKIP != 'true'
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          
+          echo "=== VERIFICATION ==="
+          echo "Checking if tag exists locally:"
+          git tag -l "$NEW_VERSION"
+          
+          echo "Checking if tag exists on remote:"
+          git ls-remote --tags origin | grep "$NEW_VERSION" || echo "Tag not found on remote"
+          
+          echo "Latest tags (sorted):"
+          git tag -l | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -5
+
+      - name: Comment on PR with release info
+        if: steps.check_tag.outputs.SHOULD_SKIP != 'true'
+        uses: actions/github-script@v6
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const version = '${{ steps.new_version.outputs.new_version }}';
+            const bumpType = '${{ steps.version_bump.outputs.bump_type }}';
+            const hasPAT = '${{ secrets.PAT_TOKEN }}' !== '';
+            
+            github.rest.issues.createComment({
+              issue_number: ${{ github.event.pull_request.number }},
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🎉 **Auto-Release Created!**
+
+            **🏷️ Version**: [${version}](https://github.com/${{ github.repository }}/releases/tag/${version}) (${bumpType} bump)
+            **🚀 Status**: Release created successfully
+            **🔖 Git Tag**: Created and pushed to repository
+            **🐳 Docker Build**: ${hasPAT ? '✅ Docker workflow will trigger automatically (PAT configured)' : '⚠️ Manual trigger required (configure PAT_TOKEN)'}
+
+            The Docker image will be available shortly at \`ghcr.io/${{ github.repository }}:${version}\`
+
+            ---
+            *This release was automatically created based on your PR labels and title.*`
+            });
+
+      - name: Comment on PR if skipped
+        if: steps.check_tag.outputs.SHOULD_SKIP == 'true'
+        uses: actions/github-script@v6
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const version = '${{ steps.new_version.outputs.new_version }}';
+            const bumpType = '${{ steps.version_bump.outputs.bump_type }}';
+            const latestTag = '${{ steps.get_tag.outputs.latest_tag }}';
+            
+            github.rest.issues.createComment({
+              issue_number: ${{ github.event.pull_request.number }},
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `⚠️ **Release Creation Skipped**
+
+            **🏷️ Attempted Version**: ${version} (${bumpType} bump)
+            **📋 Current Latest**: ${latestTag}
+            **❌ Issue**: Tag ${version} already exists
+
+            **🔧 To fix this:**
+            1. Use a different bump type in your PR title (\`[minor]\` or \`[major]\`)
+            2. Or delete the existing tag if this was a mistake
+
+            ---
+            *No new release was created for this PR.*`
+            });
+
+      - name: Summary
+        run: |
+          if [[ "${{ steps.check_tag.outputs.SHOULD_SKIP }}" == "true" ]]; then
+            echo "=== AUTO-RELEASE SUMMARY (SKIPPED) ==="
+            echo "⏭️ Release creation skipped - tag already exists"
+            echo "🏷️ Attempted version: ${{ steps.new_version.outputs.new_version }}"
+            echo "📋 Current latest: ${{ steps.get_tag.outputs.latest_tag }}"
+            echo "💡 Use different bump type or delete existing tag"
+          else
+            echo "=== AUTO-RELEASE SUMMARY ==="
+            echo "✅ Git tag created: ${{ steps.new_version.outputs.new_version }}"
+            echo "✅ Release created: ${{ steps.new_version.outputs.new_version }}"
+            echo "📝 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.new_version.outputs.new_version }}"
+            HAS_PAT="${{ secrets.PAT_TOKEN != '' }}"
+            if [[ "$HAS_PAT" == "true" ]]; then
+              echo "🔄 Docker workflow will trigger automatically (PAT configured)"
+            else
+              echo "⚠️  Configure PAT_TOKEN for automatic Docker builds"
+            fi
+            echo "🐳 Docker image will be available at: ghcr.io/${{ github.repository }}:${{ steps.new_version.outputs.new_version }}"
+          fi
