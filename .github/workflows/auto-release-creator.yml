@@ -143,18 +143,6 @@ jobs:
           echo "Waiting 10 seconds for release to be fully created..."
           sleep 10
 
-      - name: Verify Release Creation
-        run: |
-          echo "Verifying release was created..."
-          gh release view ${{ steps.new_version.outputs.new_version }} || echo "Release not found yet"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Comment on PR with release info
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
       - name: Comment on PR with release info
         uses: actions/github-script@v6
         with:
