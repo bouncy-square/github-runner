@@ -3,17 +3,13 @@ name: Auto Create Release
 on:
   pull_request:
     types: [closed]
-    branches: [staging,dev]
-    # On Successful Merge on these Branch , Automatic Release Will be Created on the basis of commit messages.branch_protection_rule: 
-    # Major for [major] or [MAJOR] in commit message
-    # Minor for [minor] or [MINOR] in commit message
-    # Patch for [patch] or [PATCH] in commit message
-    # v[Major].[Minor].[Patch]
+    branches: [staging, dev]
 
 permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: write
 
 jobs:
   auto-release:
@@ -26,7 +22,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Use PAT instead of GITHUB_TOKEN to trigger other workflows
+          token: ${{ secrets.PAT_TOKEN }}
 
       - name: Get latest tag
         id: get_tag
@@ -109,40 +106,55 @@ jobs:
           
           RELEASE_NOTES="## What's Changed
 
-            ### 🚀 Changes in this Release
-            * $PR_TITLE (#$PR_NUMBER) by @$PR_AUTHOR
+          ### 🚀 Changes in this Release
+          * $PR_TITLE (#$PR_NUMBER) by @$PR_AUTHOR
 
-            ### 📝 Details
-            $PR_BODY
+          ### 📝 Details
+          $PR_BODY
 
-            ### 🏷️ Version Information
-            * **Release Type**: $BUMP_TYPE version bump
-            * **Previous Version**: ${{ steps.get_tag.outputs.latest_tag }}
-            * **New Version**: ${{ steps.new_version.outputs.new_version }}
+          ### 🏷️ Version Information
+          * **Release Type**: $BUMP_TYPE version bump
+          * **Previous Version**: ${{ steps.get_tag.outputs.latest_tag }}
+          * **New Version**: ${{ steps.new_version.outputs.new_version }}
 
-            ---
-            **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ steps.get_tag.outputs.latest_tag }}...${{ steps.new_version.outputs.new_version }}
+          ---
+          **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ steps.get_tag.outputs.latest_tag }}...${{ steps.new_version.outputs.new_version }}
 
-            > 🐳 Docker images will be automatically built and published shortly."
+          > 🐳 Docker images will be automatically built and published shortly."
           
           echo "$RELEASE_NOTES" > release_notes.md
           echo "Release notes generated successfully"
 
       - name: Create Release
         id: create_release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         with:
           tag_name: ${{ steps.new_version.outputs.new_version }}
-          release_name: Release ${{ steps.new_version.outputs.new_version }}
+          name: Release ${{ steps.new_version.outputs.new_version }}
           body_path: release_notes.md
           draft: false
           prerelease: false
+          make_latest: true
+          generate_release_notes: false
+
+      - name: Wait for Release to be Available
+        run: |
+          echo "Waiting 10 seconds for release to be fully created..."
+          sleep 10
+
+      - name: Verify Release Creation
+        run: |
+          echo "Verifying release was created..."
+          gh release view ${{ steps.new_version.outputs.new_version }} || echo "Release not found yet"
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
 
       - name: Comment on PR with release info
         uses: actions/github-script@v6
         with:
+          github-token: ${{ secrets.PAT_TOKEN }}
           script: |
             const version = '${{ steps.new_version.outputs.new_version }}';
             const bumpType = '${{ steps.version_bump.outputs.bump_type }}';
@@ -155,18 +167,18 @@ jobs:
 
             **🏷️ Version**: [${version}](https://github.com/${{ github.repository }}/releases/tag/${version}) (${bumpType} bump)
             **🚀 Status**: Release created successfully
-            **🐳 Docker Build**: Your docker-release workflow will now be triggered automatically
+            **🐳 Docker Build**: Docker workflow should trigger automatically
 
             The Docker image will be available shortly at \`ghcr.io/${{ github.repository }}:${version}\`
 
             ---
             *This release was automatically created based on your PR labels and title.*`
-                        });
+            });
 
       - name: Summary
         run: |
           echo "=== AUTO-RELEASE SUMMARY ==="
           echo "✅ Release created: ${{ steps.new_version.outputs.new_version }}"
           echo "📝 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.new_version.outputs.new_version }}"
-          echo "🔄 Docker workflow will be triggered automatically"
+          echo "🔄 Docker workflow should trigger automatically"
           echo "🐳 Docker image will be available at: ghcr.io/${{ github.repository }}:${{ steps.new_version.outputs.new_version }}"
