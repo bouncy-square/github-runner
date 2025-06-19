@@ -95,6 +95,42 @@ jobs:
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "New version calculated: $NEW_VERSION"
 
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          if git rev-parse "$NEW_VERSION" >/dev/null 2>&1; then
+            echo "Tag $NEW_VERSION already exists!"
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+            echo "Existing tags:"
+            git tag -l | tail -10
+            exit 1
+          else
+            echo "Tag $NEW_VERSION does not exist, proceeding..."
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create and push Git tag
+        id: create_tag
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          
+          echo "Creating Git tag: $NEW_VERSION"
+          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
+          
+          echo "Pushing tag to remote..."
+          git push origin "$NEW_VERSION"
+          
+          echo "Verifying tag was created..."
+          git tag -l "$NEW_VERSION"
+          
+          echo "✅ Tag $NEW_VERSION created and pushed successfully"
+
       - name: Generate release notes
         id: release_notes
         run: |
@@ -145,6 +181,20 @@ jobs:
           echo "Waiting 10 seconds for release to be fully created..."
           sleep 10
 
+      - name: Verify release and tag
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          
+          echo "=== VERIFICATION ==="
+          echo "Checking if tag exists locally:"
+          git tag -l "$NEW_VERSION"
+          
+          echo "Checking if tag exists on remote:"
+          git ls-remote --tags origin | grep "$NEW_VERSION" || echo "Tag not found on remote"
+          
+          echo "Latest tags:"
+          git tag -l | sort -V | tail -5
+
       - name: Comment on PR with release info
         uses: actions/github-script@v6
         with:
@@ -162,6 +212,7 @@ jobs:
 
             **🏷️ Version**: [${version}](https://github.com/${{ github.repository }}/releases/tag/${version}) (${bumpType} bump)
             **🚀 Status**: Release created successfully
+            **🔖 Git Tag**: Created and pushed to repository
             **🐳 Docker Build**: ${hasPAT ? '✅ Docker workflow will trigger automatically (PAT configured)' : '⚠️ Manual trigger required (configure PAT_TOKEN)'}
 
             The Docker image will be available shortly at \`ghcr.io/${{ github.repository }}:${version}\`
@@ -173,6 +224,7 @@ jobs:
       - name: Summary
         run: |
           echo "=== AUTO-RELEASE SUMMARY ==="
+          echo "✅ Git tag created: ${{ steps.new_version.outputs.new_version }}"
           echo "✅ Release created: ${{ steps.new_version.outputs.new_version }}"
           echo "📝 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.new_version.outputs.new_version }}"
           HAS_PAT="${{ secrets.PAT_TOKEN != '' }}"
