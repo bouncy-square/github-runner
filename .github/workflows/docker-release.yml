@@ -161,16 +161,13 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # Version tags
             type=semver,pattern={{version}},value=${{ env.VERSION }}
             type=semver,pattern={{major}}.{{minor}},value=${{ env.VERSION }}
             type=semver,pattern={{major}},value=${{ env.VERSION }},enable={{is_default_branch}}
             
-            # Branch-based tags
             type=raw,value=${{ env.SANITIZED_BRANCH }}-latest
             type=raw,value=${{ env.SANITIZED_BRANCH }}-${{ env.VERSION }}
             
-            # SHA tag for traceability
             type=sha,format=long,prefix=${{ env.SANITIZED_BRANCH }}-sha-
 
       - name: Cache Docker layers
@@ -218,6 +215,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const { owner, repo } = context.repo;
+
             const releaseId = '${{ steps.get_release.outputs.release_id }}';
             const version = '${{ env.VERSION }}';
             const branchName = '${{ env.BRANCH_NAME }}';
@@ -231,7 +229,6 @@ jobs:
             const versionMatch = version.match(/v?(\d+)\.(\d+)\.(\d+)/);
             const majorVersion = versionMatch ? versionMatch[1] : '';
             const minorVersion = versionMatch ? `${versionMatch[1]}.${versionMatch[2]}` : '';
-            
             let triggerText = '';
             switch(triggerSource) {
               case 'manual_dispatch':
