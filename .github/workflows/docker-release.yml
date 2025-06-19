@@ -2,8 +2,17 @@ name: Build and Publish Docker Image
 
 on:
   release:
-    # Release Created [even in drafts as Well] and Published [release is Public]
-    types: [created,published]
+    types: [created, published]
+  workflow_run:
+    workflows: ["Auto Create Release"]
+    types: [completed]
+    branches: [main, staging, dev]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to build'
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -17,20 +26,34 @@ permissions:
 
 jobs:
   debug:
-    name: Debug Release Event
+    name: Debug Event
     runs-on: ubuntu-latest
     steps:
       - name: Debug GitHub Event
         run: |
           echo "Event name: ${{ github.event_name }}"
-          echo "Event action: ${{ github.event.action }}"
-          echo "Release state: ${{ github.event.release.draft }}"
-          echo "Release prerelease: ${{ github.event.release.prerelease }}"
-          echo "Release published_at: ${{ github.event.release.published_at }}"
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "Event action: ${{ github.event.action }}"
+            echo "Release state: ${{ github.event.release.draft }}"
+            echo "Release prerelease: ${{ github.event.release.prerelease }}"
+            echo "Release published_at: ${{ github.event.release.published_at }}"
+            echo "Release tag: ${{ github.event.release.tag_name }}"
+          elif [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "Workflow run conclusion: ${{ github.event.workflow_run.conclusion }}"
+            echo "Workflow run name: ${{ github.event.workflow_run.name }}"
+            echo "Workflow run head branch: ${{ github.event.workflow_run.head_branch }}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "Manual trigger with tag: ${{ github.event.inputs.release_tag }}"
+          fi
 
   build-and-publish:
     name: Build and Publish
     runs-on: ubuntu-latest
+    # Run for: successful auto-release workflow, manual releases, or manual dispatch
+    if: |
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      github.event_name == 'release' ||
+      github.event_name == 'workflow_dispatch'
     
     steps:
       - name: Checkout code
@@ -39,39 +62,68 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Get release information
+        id: get_release
+        uses: actions/github-script@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            let releaseTag = '';
+            let branchName = 'main';
+            let releaseId = '';
+            let releaseBody = '';
+            
+            if ('${{ github.event_name }}' === 'workflow_dispatch') {
+              releaseTag = '${{ github.event.inputs.release_tag }}';
+              console.log('Using workflow_dispatch release tag:', releaseTag);
+            } else if ('${{ github.event_name }}' === 'release') {
+              // Direct release event
+              releaseTag = '${{ github.event.release.tag_name }}';
+              branchName = '${{ github.event.release.target_commitish }}' || 'main';
+              releaseId = '${{ github.event.release.id }}';
+              releaseBody = `${{ github.event.release.body }}` || '';
+              console.log('Using direct release event:', releaseTag);
+            } else {
+              // workflow_run - get latest release
+              try {
+                const { data: release } = await github.rest.repos.getLatestRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo
+                });
+                
+                releaseTag = release.tag_name;
+                branchName = release.target_commitish || 'main';
+                releaseId = release.id;
+                releaseBody = release.body || '';
+                
+                console.log('Found latest release from workflow_run:', releaseTag);
+                console.log('Target branch:', branchName);
+              } catch (error) {
+                console.log('Error getting release:', error.message);
+                core.setFailed('Could not find latest release');
+                return;
+              }
+            }
+            
+            core.setOutput('release_tag', releaseTag);
+            core.setOutput('branch_name', branchName);
+            core.setOutput('release_id', releaseId);
+            core.setOutput('release_body', releaseBody);
+
       - name: Extract branch name and version
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            # For releases, use the target branch (where the release was created from)
-            BRANCH_NAME="${{ github.event.release.target_commitish }}"
-            # Try multiple ways to get the release version
-            if [[ -n "${{ github.event.release.tag_name }}" ]]; then
-              VERSION="${{ github.event.release.tag_name }}"
-            elif [[ -n "${{ github.ref_name }}" ]]; then
-              VERSION="${{ github.ref_name }}"
-            else
-              VERSION="${{ github.sha }}"
-            fi
-            
-            # Fallback if target_commitish is empty
-            if [[ -z "$BRANCH_NAME" ]]; then
-              BRANCH_NAME="main"
-            fi
-          else
-            # For pushes, extract branch name from ref
-            BRANCH_NAME="${{ github.ref_name }}"
-            VERSION="${{ github.sha }}"
-          fi
+          RELEASE_TAG="${{ steps.get_release.outputs.release_tag }}"
+          BRANCH_NAME="${{ steps.get_release.outputs.branch_name }}"
           
           # Sanitize branch name for Docker tag (replace / and other invalid chars with -)
           SANITIZED_BRANCH=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/--*/-/g' | sed 's/^-\|-$//g')
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
           echo "SANITIZED_BRANCH=$SANITIZED_BRANCH" >> $GITHUB_ENV
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "VERSION=$RELEASE_TAG" >> $GITHUB_ENV
           echo "Branch: $BRANCH_NAME"
           echo "Sanitized: $SANITIZED_BRANCH"
-          echo "Version: $VERSION"
+          echo "Version: $RELEASE_TAG"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -93,19 +145,15 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             # For releases: create version tags
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=semver,pattern=${{ env.SANITIZED_BRANCH }}-{{version}}
+            type=semver,pattern={{version}},value=${{ env.VERSION }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.VERSION }}
+            type=semver,pattern={{major}},value=${{ env.VERSION }}
+            type=semver,pattern=${{ env.SANITIZED_BRANCH }}-{{version}},value=${{ env.VERSION }}
             
             # For branches: create branch-based tags
-            type=raw,value=${{ env.SANITIZED_BRANCH }}-latest,enable={{is_default_branch}}
-            type=raw,value=${{ env.SANITIZED_BRANCH }}-latest,enable=${{ github.event_name != 'release' }}
+            type=raw,value=${{ env.SANITIZED_BRANCH }}-latest
             
-            # Additional useful tags
-            type=ref,event=branch,prefix={{branch}}-
-            type=ref,event=tag
-            type=ref,event=pr
+            # SHA tag
             type=sha,format=long,prefix=${{ env.SANITIZED_BRANCH }}-sha-
 
       - name: Cache Docker layers
@@ -124,13 +172,6 @@ jobs:
           echo "GitHub ref: ${{ github.ref }}"
           echo "GitHub ref name: ${{ github.ref_name }}"
           echo "GitHub SHA: ${{ github.sha }}"
-          
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            echo "=== Release Event Debug ==="
-            echo "Release tag name: ${{ github.event.release.tag_name }}"
-            echo "Release target commitish: ${{ github.event.release.target_commitish }}"
-            echo "Release name: ${{ github.event.release.name }}"
-          fi
           
           echo "=== Final Environment Variables ==="
           echo "BRANCH_NAME: ${{ env.BRANCH_NAME }}"
@@ -153,24 +194,26 @@ jobs:
             version=${{ env.VERSION }}
 
       - name: Update Release with Image Info
-        if: success() && github.event_name == 'release'
+        if: success() && steps.get_release.outputs.release_id != ''
         uses: actions/github-script@v6
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const { owner, repo } = context.repo;
-            const releaseId = ${{ github.event.release.id }};
-            const version = '${{ github.ref_name }}';
-            const branchName = process.env.BRANCH_NAME;
-            const sanitizedBranch = process.env.SANITIZED_BRANCH;
+            const releaseId = '${{ steps.get_release.outputs.release_id }}';
+            const version = '${{ env.VERSION }}';
+            const branchName = '${{ env.BRANCH_NAME }}';
+            const sanitizedBranch = '${{ env.SANITIZED_BRANCH }}';
             const registry = '${{ env.REGISTRY }}'.toLowerCase();
             const ownerLower = owner.toLowerCase();
             const imageName = `${registry}/${ownerLower}/${repo}`;
+            const releaseBody = `${{ steps.get_release.outputs.release_body }}`;
             
             const versionMatch = version.match(/v?(\d+)\.(\d+)\.(\d+)/);
             const majorVersion = versionMatch ? versionMatch[1] : '';
             const minorVersion = versionMatch ? `${versionMatch[1]}.${versionMatch[2]}` : '';
             
-            const message = `### 🐳 Docker Image\n` +
+            const message = `\n\n### 🐳 Docker Image\n` +
                           `**Latest Image:** \`${imageName}:${sanitizedBranch}-latest\`\n` +
                           `**Version Tag:** \`${imageName}:${version}\`\n` +
                           `**Branch Version:** \`${imageName}:${sanitizedBranch}-${version}\`\n` +
@@ -182,12 +225,17 @@ jobs:
                           `# Pull by branch version\ndocker pull ${imageName}:${sanitizedBranch}-${version}\n\n` +
                           `# Pull latest from branch\ndocker pull ${imageName}:${sanitizedBranch}-latest\n\`\`\``;
 
-            await github.rest.repos.updateRelease({
-              owner,
-              repo,
-              release_id: releaseId,
-              body: `${{ github.event.release.body }}\n\n${message}`
-            });
+            try {
+              await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: releaseId,
+                body: releaseBody + message
+              });
+              console.log('Successfully updated release with Docker info');
+            } catch (error) {
+              console.log('Failed to update release:', error.message);
+            }
 
       - name: Move cache
         run: |
